@@ -1,0 +1,68 @@
+{
+  "name": "@rentwell/api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "ts-node-dev --respawn --transpile-only -r tsconfig-paths/register src/main.ts",
+    "start": "node dist/main.js",
+    "test": "vitest run --passWithNoTests",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.27.3",
+    "@apollo/server": "^4.10.5",
+    "@nestjs/apollo": "^12.2.0",
+    "@nestjs/common": "^10.3.10",
+    "@nestjs/core": "^10.3.10",
+    "@nestjs/graphql": "^12.2.0",
+    "@nestjs/platform-express": "^10.3.10",
+    "@rentwell/database": "workspace:*",
+    "@rentwell/domain": "workspace:*",
+    "@rentwell/graphql": "workspace:*",
+    "@rentwell/integrations": "workspace:*",
+    "@rentwell/observability": "workspace:*",
+    "argon2": "^0.40.3",
+    "bullmq": "^5.12.0",
+    "cookie-parser": "^1.4.6",
+    "dataloader": "^2.2.2",
+    "dotenv": "16.4.5",
+    "express": "^4.19.2",
+    "graphql": "^16.9.0",
+    "graphql-query-complexity": "^0.12.0",
+    "ioredis": "^5.4.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.7",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.10",
+    "ts-node-dev": "^2.0.0",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.5.3",
+    "vitest": "^1.6.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/main.d.ts",
+      "default": "./dist/main.js"
+    },
+    "./modules": {
+      "types": "./dist/modules.d.ts",
+      "default": "./dist/modules.js"
+    }
+  },
+  "types": "./dist/modules.d.ts",
+  "typesVersions": {
+    "*": {
+      "modules": [
+        "dist/modules.d.ts"
+      ]
+    }
+  }
+}

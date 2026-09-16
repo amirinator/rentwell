@@ -1,0 +1,28 @@
+{
+  "name": "@rentwell/test-fixtures",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "seed": "ts-node --transpile-only src/cli.ts",
+    "seed:reset": "ts-node --transpile-only src/cli.ts --reset",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@rentwell/database": "workspace:*",
+    "@rentwell/domain": "workspace:*",
+    "@rentwell/integrations": "workspace:*",
+    "argon2": "^0.40.3",
+    "dotenv": "16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.3",
+    "vitest": "^1.6.0"
+  }
+}

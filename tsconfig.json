@@ -1,0 +1,14 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/domain" },
+    { "path": "./packages/database" },
+    { "path": "./packages/graphql" },
+    { "path": "./packages/integrations" },
+    { "path": "./packages/observability" },
+    { "path": "./packages/test-fixtures" },
+    { "path": "./apps/api" },
+    { "path": "./apps/worker" },
+    { "path": "./apps/web" }
+  ]
+}

@@ -1,0 +1,1276 @@
+// Rentwell database schema.
+//
+// Conventions used throughout:
+//
+//  * Money is stored as BigInt minor units (cents). Never a float, never a
+//    Decimal that application code might round twice. `packages/database/src/money.ts`
+//    converts to and from the domain `Money` type and rejects values outside
+//    the JavaScript safe-integer range.
+//  * Timestamps are `DateTime @db.Timestamptz(6)` and always UTC. Business
+//    dates that belong to a property's own calendar are `@db.Date` and carry no
+//    offset; the two are never mixed.
+//  * Accounting periods are stored as a `YYYY-MM` string alongside the date, so
+//    period filters are index-friendly and do not depend on date_trunc.
+//  * Every business record carries `organizationId`. Composite foreign keys
+//    that include it stop a child row from pointing at a parent in another
+//    organization even if application code slips.
+//  * `version` columns are bumped on every write to a record that takes part in
+//    optimistic concurrency (charges, transactions, leases, periods).
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["relationJoins"]
+
+  // Generated into the workspace rather than into node_modules.
+  //
+  // Prisma's result types leak into the public signatures of services and
+  // resolvers in other packages. Under pnpm's isolated node_modules, the
+  // default output lives at a store path no other package can name, and every
+  // such signature fails to compile with TS2742. Emitting here gives those
+  // types an ordinary in-repo path that declaration files can reference.
+  //
+  // The path is resolved from the schema's own directory, so this is
+  // packages/database/generated/prisma — one level under the package root,
+  // which means `../generated/prisma` resolves identically from src/ and from
+  // the compiled dist/.
+  output = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ===========================================================================
+// Enumerations. Mirrored in packages/domain/src/types.ts; the parity test in
+// packages/database/test/enum-parity.test.ts fails if the two drift.
+// ===========================================================================
+
+enum Role {
+  ORG_ADMIN
+  PORTFOLIO_CONTROLLER
+  ACCOUNTANT
+  PROPERTY_MANAGER
+  AUDITOR
+}
+
+enum MembershipStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum PropertyStatus {
+  ACTIVE
+  INACTIVE
+  DISPOSED
+}
+
+enum OccupancyStatus {
+  VACANT
+  OCCUPIED
+  OUT_OF_SERVICE
+}
+
+enum TenantKind {
+  ORGANIZATION
+  INDIVIDUAL
+}
+
+enum LeaseStatus {
+  DRAFT
+  ACTIVE
+  EXPIRED
+  TERMINATED
+}
+
+enum ChargeType {
+  BASE_RENT
+  OPERATING
+  ONE_TIME
+}
+
+enum ChargeStatus {
+  POSTED
+  SETTLED
+  VOIDED
+}
+
+enum ScheduleFrequency {
+  MONTHLY
+  ONE_TIME
+}
+
+enum ProrationMethod {
+  ACTUAL_DAYS_IN_MONTH
+  THIRTY_DAY_MONTH
+  NONE
+}
+
+enum ImportStatus {
+  DRAFT
+  VALIDATING
+  READY
+  QUEUED
+  PROCESSING
+  COMPLETED
+  VALIDATION_FAILED
+  FAILED
+  CANCELLED
+}
+
+enum TransactionSource {
+  CSV_IMPORT
+  PROVIDER_SYNC
+  PROVIDER_WEBHOOK
+  MANUAL
+}
+
+enum TransactionStatus {
+  UNAPPLIED
+  PARTIALLY_ALLOCATED
+  ALLOCATED
+  REVERSED
+  EXCLUDED
+}
+
+enum TransactionDirection {
+  CREDIT
+  DEBIT
+}
+
+enum SuggestionStatus {
+  PROPOSED
+  APPROVED
+  REJECTED
+  SUPERSEDED
+}
+
+enum MatchStrategy {
+  EXACT_REFERENCE_AND_AMOUNT
+  EXACT_AMOUNT_SINGLE_CHARGE
+  REFERENCE_PARTIAL_AMOUNT
+  COMBINED_CHARGES
+  OVERPAYMENT_WITH_REMAINDER
+  DESCRIPTION_HEURISTIC
+}
+
+enum AllocationStatus {
+  ACTIVE
+  REVERSED
+}
+
+enum ExceptionCategory {
+  MISSING_REFERENCE
+  AMBIGUOUS_MATCH
+  UNDERPAYMENT
+  OVERPAYMENT
+  SUSPECTED_DUPLICATE
+  CURRENCY_MISMATCH
+  REVERSED_PAYMENT
+  INTEGRATION_CONFLICT
+}
+
+enum ExceptionStatus {
+  OPEN
+  ASSIGNED
+  IN_REVIEW
+  RESOLVED
+}
+
+enum ExceptionSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum ExceptionResolution {
+  ALLOCATED
+  REVERSED
+  CREDIT_ISSUED
+  CLASSIFIED_UNAPPLIED
+  DUPLICATE_CONFIRMED
+  WRITTEN_OFF
+  NO_ACTION_REQUIRED
+}
+
+enum LedgerAccountCode {
+  ACCOUNTS_RECEIVABLE
+  RENTAL_INCOME
+  OPERATING_CHARGE_INCOME
+  CASH_CLEARING
+  UNAPPLIED_CASH
+}
+
+enum NormalBalance {
+  DEBIT
+  CREDIT
+}
+
+enum JournalEventType {
+  CHARGE_POSTED
+  CHARGE_CREDITED
+  PAYMENT_RECEIVED
+  PAYMENT_ALLOCATED
+  ALLOCATION_REVERSED
+  PAYMENT_REVERSED
+}
+
+enum PeriodStatus {
+  OPEN
+  IN_REVIEW
+  CLOSED
+}
+
+enum OutboxStatus {
+  PENDING
+  DISPATCHED
+  FAILED
+  DEAD_LETTER
+}
+
+enum AssistantRunStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+  BUDGET_EXCEEDED
+}
+
+// ===========================================================================
+// Identity and access
+// ===========================================================================
+
+model Organization {
+  id        String   @id @default(uuid()) @db.Uuid
+  slug      String   @unique
+  name      String
+  /// ISO 4217. Version 1 configures USD for every organization.
+  currency  String   @default("USD") @db.Char(3)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  memberships            Membership[]
+  properties             Property[]
+  tenants                Tenant[]
+  leases                 Lease[]
+  chargeSchedules        ChargeSchedule[]
+  charges                Charge[]
+  creditAdjustments      CreditAdjustment[]
+  bankAccounts           BankAccount[]
+  integrationConnections IntegrationConnection[]
+  importBatches          ImportBatch[]
+  bankTransactions       BankTransaction[]
+  matchSuggestions       MatchSuggestion[]
+  allocations            Allocation[]
+  allocationReversals    AllocationReversal[]
+  exceptions             ReconciliationException[]
+  ledgerAccounts         LedgerAccount[]
+  journalEntries         JournalEntry[]
+  accountingPeriods      AccountingPeriod[]
+  closeSnapshots         CloseSnapshot[]
+  auditEvents            AuditEvent[]
+  outboxEvents           OutboxEvent[]
+  idempotencyRecords     IdempotencyRecord[]
+  assistantRuns          AssistantRun[]
+
+  @@map("organizations")
+}
+
+model User {
+  id             String    @id @default(uuid()) @db.Uuid
+  email          String    @unique @db.Citext
+  displayName    String
+  /// Argon2id hash. Never a plaintext or reversible value.
+  passwordHash   String
+  /// Set when an administrator disables sign-in without deleting history.
+  disabledAt     DateTime? @db.Timestamptz(6)
+  lastSignedInAt DateTime? @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+
+  memberships        Membership[]
+  sessions           Session[]
+  auditEvents        AuditEvent[]              @relation("AuditActor")
+  assignedExceptions ReconciliationException[] @relation("ExceptionAssignee")
+  resolvedExceptions ReconciliationException[] @relation("ExceptionResolver")
+  exceptionComments  ExceptionComment[]
+  closeSnapshots     CloseSnapshot[]
+  assistantRuns      AssistantRun[]
+
+  @@map("users")
+}
+
+model Membership {
+  id             String           @id @default(uuid()) @db.Uuid
+  userId         String           @db.Uuid
+  organizationId String           @db.Uuid
+  role           Role
+  status         MembershipStatus @default(ACTIVE)
+  createdAt      DateTime         @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime         @updatedAt @db.Timestamptz(6)
+
+  user         User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  assignments  PropertyAssignment[]
+
+  @@unique([userId, organizationId])
+  @@index([organizationId, role])
+  @@map("memberships")
+}
+
+model PropertyAssignment {
+  id           String   @id @default(uuid()) @db.Uuid
+  membershipId String   @db.Uuid
+  propertyId   String   @db.Uuid
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+
+  membership Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  property   Property   @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@unique([membershipId, propertyId])
+  @@index([propertyId])
+  @@map("property_assignments")
+}
+
+model Session {
+  /// Opaque random identifier. The cookie carries this value and nothing else.
+  id             String    @id
+  userId         String    @db.Uuid
+  organizationId String    @db.Uuid
+  /// Rotated on privilege change; compared on every mutating request.
+  csrfToken      String
+  userAgent      String?
+  ipAddress      String?
+  expiresAt      DateTime  @db.Timestamptz(6)
+  revokedAt      DateTime? @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  lastSeenAt     DateTime  @default(now()) @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// ===========================================================================
+// Portfolio
+// ===========================================================================
+
+model Property {
+  id             String         @id @default(uuid()) @db.Uuid
+  organizationId String         @db.Uuid
+  code           String
+  name           String
+  addressLine1   String
+  addressLine2   String?
+  city           String
+  region         String
+  postalCode     String
+  countryCode    String         @db.Char(2)
+  /// IANA zone. Every instant/business-date conversion for this property uses it.
+  timezone       String         @default("America/New_York")
+  currency       String         @default("USD") @db.Char(3)
+  status         PropertyStatus @default(ACTIVE)
+  /// Day of month rent falls due, used as the default for new schedules.
+  defaultDueDay  Int            @default(1)
+  createdAt      DateTime       @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime       @updatedAt @db.Timestamptz(6)
+
+  organization      Organization              @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  units             Unit[]
+  leases            Lease[]
+  charges           Charge[]
+  bankAccounts      BankAccount[]
+  importBatches     ImportBatch[]
+  bankTransactions  BankTransaction[]
+  allocations       Allocation[]
+  exceptions        ReconciliationException[]
+  journalEntries    JournalEntry[]
+  accountingPeriods AccountingPeriod[]
+  closeSnapshots    CloseSnapshot[]
+  assignments       PropertyAssignment[]
+  creditAdjustments CreditAdjustment[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId, status])
+  @@map("properties")
+}
+
+model Unit {
+  id             String          @id @default(uuid()) @db.Uuid
+  organizationId String          @db.Uuid
+  propertyId     String          @db.Uuid
+  identifier     String
+  /// Rentable area in square feet. Reporting only; never used to compute rent.
+  rentableArea   Int?
+  floor          String?
+  occupancy      OccupancyStatus @default(VACANT)
+  createdAt      DateTime        @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime        @updatedAt @db.Timestamptz(6)
+
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  leases   Lease[]
+
+  @@unique([propertyId, identifier])
+  @@index([organizationId])
+  @@map("units")
+}
+
+model Tenant {
+  id               String     @id @default(uuid()) @db.Uuid
+  organizationId   String     @db.Uuid
+  kind             TenantKind @default(ORGANIZATION)
+  displayName      String
+  /// Synthetic in this repository. No real contact data is committed.
+  contactEmail     String?
+  contactPhone     String?
+  /// Reference printed on invoices and matched against bank references.
+  paymentReference String?
+  isActive         Boolean    @default(true)
+  createdAt        DateTime   @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime   @updatedAt @db.Timestamptz(6)
+
+  organization Organization              @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  leases       Lease[]
+  charges      Charge[]
+  exceptions   ReconciliationException[]
+
+  @@unique([organizationId, paymentReference])
+  @@index([organizationId, displayName])
+  @@map("tenants")
+}
+
+model Lease {
+  id               String      @id @default(uuid()) @db.Uuid
+  organizationId   String      @db.Uuid
+  propertyId       String      @db.Uuid
+  unitId           String      @db.Uuid
+  tenantId         String      @db.Uuid
+  reference        String
+  status           LeaseStatus @default(DRAFT)
+  currency         String      @default("USD") @db.Char(3)
+  termStart        DateTime    @db.Date
+  /// Inclusive last day of the term. Null means open-ended.
+  termEnd          DateTime?   @db.Date
+  /// Per-lease payment reference. Falls back to the tenant's when null.
+  paymentReference String?
+  version          Int         @default(1)
+  createdAt        DateTime    @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime    @updatedAt @db.Timestamptz(6)
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  property     Property         @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  unit         Unit             @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  tenant       Tenant           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  schedules    ChargeSchedule[]
+  amendments   LeaseAmendment[]
+  charges      Charge[]
+
+  @@unique([organizationId, reference])
+  @@index([propertyId, status])
+  @@index([tenantId])
+  @@index([unitId, termStart])
+  @@map("leases")
+}
+
+model LeaseAmendment {
+  id              String   @id @default(uuid()) @db.Uuid
+  leaseId         String   @db.Uuid
+  /// Human-readable summary of what changed and why.
+  summary         String
+  /// Full before/after payload for the audit explorer.
+  changes         Json     @default("{}")
+  effectiveOn     DateTime @db.Date
+  createdByUserId String?  @db.Uuid
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+
+  lease Lease @relation(fields: [leaseId], references: [id], onDelete: Cascade)
+
+  @@index([leaseId, effectiveOn])
+  @@map("lease_amendments")
+}
+
+// ===========================================================================
+// Billing
+// ===========================================================================
+
+model ChargeSchedule {
+  id             String            @id @default(uuid()) @db.Uuid
+  organizationId String            @db.Uuid
+  leaseId        String            @db.Uuid
+  chargeType     ChargeType
+  frequency      ScheduleFrequency @default(MONTHLY)
+  description    String
+  isActive       Boolean           @default(true)
+  createdAt      DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime          @updatedAt @db.Timestamptz(6)
+
+  organization Organization            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  lease        Lease                   @relation(fields: [leaseId], references: [id], onDelete: Restrict)
+  versions     ChargeScheduleVersion[]
+  charges      Charge[]
+
+  @@index([leaseId, isActive])
+  @@map("charge_schedules")
+}
+
+/// An effective-dated version of a schedule. Amendments append a new version;
+/// existing versions are never edited, so a posted charge can always point at
+/// the exact terms that produced it.
+model ChargeScheduleVersion {
+  id            String    @id @default(uuid()) @db.Uuid
+  scheduleId    String    @db.Uuid
+  versionNumber Int
+  amountCents   BigInt
+  currency      String    @db.Char(3)
+  effectiveFrom DateTime  @db.Date
+  /// Inclusive last effective day. Null means open-ended.
+  effectiveTo   DateTime? @db.Date
+  dueDayOfMonth Int       @default(1)
+  prorate       Boolean   @default(true)
+  note          String?
+  createdAt     DateTime  @default(now()) @db.Timestamptz(6)
+
+  schedule ChargeSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  charges  Charge[]
+
+  @@unique([scheduleId, versionNumber])
+  @@index([scheduleId, effectiveFrom])
+  @@map("charge_schedule_versions")
+}
+
+model Charge {
+  id                String  @id @default(uuid()) @db.Uuid
+  organizationId    String  @db.Uuid
+  propertyId        String  @db.Uuid
+  leaseId           String  @db.Uuid
+  tenantId          String  @db.Uuid
+  scheduleId        String? @db.Uuid
+  scheduleVersionId String? @db.Uuid
+
+  /// Deterministic identity of this charge within its period. The unique index
+  /// below is what makes repeated generation a no-op rather than a double bill.
+  generationKey String
+
+  type           ChargeType
+  status         ChargeStatus @default(POSTED)
+  currency       String       @db.Char(3)
+  amountCents    BigInt
+  /// Running totals maintained inside the same transaction as their source rows.
+  allocatedCents BigInt       @default(0)
+  creditedCents  BigInt       @default(0)
+  /// Materialised `amountCents - allocatedCents - creditedCents`.
+  ///
+  /// Kept as a column rather than computed per query so "still outstanding"
+  /// is an indexable predicate. Without it, filtering or aging by open balance
+  /// means loading every charge and subtracting in application code, which
+  /// breaks cursor pagination and does not scale. Every write path that moves
+  /// an allocation or a credit updates this in the same statement, and the
+  /// close checklist recomputes the total independently as a cross-check.
+  openCents      BigInt       @default(0)
+
+  serviceStart DateTime @db.Date
+  serviceEnd   DateTime @db.Date
+  dueDate      DateTime @db.Date
+  /// Date the charge is recognised on; determines the period below.
+  postingDate  DateTime @db.Date
+  period       String   @db.VarChar(7)
+
+  description String
+  /// Inputs and intermediate values of the proration that produced the amount.
+  calculation Json   @default("{}")
+
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization    Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  property        Property               @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  lease           Lease                  @relation(fields: [leaseId], references: [id], onDelete: Restrict)
+  tenant          Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  schedule        ChargeSchedule?        @relation(fields: [scheduleId], references: [id], onDelete: Restrict)
+  scheduleVersion ChargeScheduleVersion? @relation(fields: [scheduleVersionId], references: [id], onDelete: Restrict)
+  allocations     Allocation[]
+  credits         CreditAdjustment[]
+
+  @@unique([organizationId, generationKey])
+  @@index([propertyId, period, status])
+  @@index([tenantId, status, dueDate])
+  @@index([leaseId, period])
+  @@index([propertyId, dueDate])
+  /// Serves the receivables list and the aging report, both of which filter on
+  /// "open balance greater than zero" and order by due date.
+  @@index([propertyId, openCents, dueDate])
+  @@map("charges")
+}
+
+model CreditAdjustment {
+  id              String   @id @default(uuid()) @db.Uuid
+  organizationId  String   @db.Uuid
+  propertyId      String   @db.Uuid
+  chargeId        String   @db.Uuid
+  amountCents     BigInt
+  currency        String   @db.Char(3)
+  /// Required. A credit without a stated reason is not accepted.
+  reason          String
+  postingDate     DateTime @db.Date
+  period          String   @db.VarChar(7)
+  createdByUserId String?  @db.Uuid
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  property     Property     @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  charge       Charge       @relation(fields: [chargeId], references: [id], onDelete: Restrict)
+
+  @@index([chargeId])
+  @@index([propertyId, period])
+  @@map("credit_adjustments")
+}
+
+// ===========================================================================
+// Ingestion
+// ===========================================================================
+
+model BankAccount {
+  id                String   @id @default(uuid()) @db.Uuid
+  organizationId    String   @db.Uuid
+  propertyId        String   @db.Uuid
+  label             String
+  /// Last four digits only. Full account numbers are never stored.
+  maskedNumber      String   @db.VarChar(8)
+  currency          String   @db.Char(3)
+  /// Identifier used by the provider adapter for this account.
+  providerAccountId String?
+  connectionId      String?  @db.Uuid
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  property     Property               @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  connection   IntegrationConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  transactions BankTransaction[]
+  imports      ImportBatch[]
+
+  @@index([propertyId, isActive])
+  @@index([organizationId])
+  @@map("bank_accounts")
+}
+
+model IntegrationConnection {
+  id               String    @id @default(uuid()) @db.Uuid
+  organizationId   String    @db.Uuid
+  /// "simulator" is the only provider shipped in the public repository.
+  provider         String
+  label            String
+  status           String    @default("CONNECTED")
+  /// Opaque cursor. Advanced only after a batch is durably processed.
+  syncCursor       String?
+  lastSyncedAt     DateTime? @db.Timestamptz(6)
+  lastErrorAt      DateTime? @db.Timestamptz(6)
+  lastErrorMessage String?
+  /// Non-secret adapter settings. Credentials live in environment variables.
+  settings         Json      @default("{}")
+  createdAt        DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime  @updatedAt @db.Timestamptz(6)
+
+  organization  Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  bankAccounts  BankAccount[]
+  webhookEvents ProviderWebhookEvent[]
+
+  @@unique([organizationId, provider, label])
+  @@map("integration_connections")
+}
+
+/// A provider webhook delivery. Stored before processing so a redelivery of the
+/// same provider event id is recognised and dropped.
+model ProviderWebhookEvent {
+  id           String    @id @default(uuid()) @db.Uuid
+  connectionId String    @db.Uuid
+  /// The provider's own event identifier.
+  eventId      String
+  eventType    String
+  payload      Json
+  receivedAt   DateTime  @default(now()) @db.Timestamptz(6)
+  processedAt  DateTime? @db.Timestamptz(6)
+  errorMessage String?
+
+  connection IntegrationConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, eventId])
+  @@index([processedAt])
+  @@map("provider_webhook_events")
+}
+
+model ImportBatch {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  propertyId     String       @db.Uuid
+  bankAccountId  String       @db.Uuid
+  status         ImportStatus @default(DRAFT)
+
+  originalFilename String
+  /// Key in private object storage. Never publicly readable.
+  storageKey       String
+  fileSizeBytes    Int
+  /// SHA-256 of the uploaded bytes. Confirmation is bound to this value.
+  fileHash         String @db.VarChar(64)
+
+  totalRows     Int @default(0)
+  processedRows Int @default(0)
+  createdRows   Int @default(0)
+  duplicateRows Int @default(0)
+  failedRows    Int @default(0)
+  /// Highest row index durably committed. Lets a crashed worker resume.
+  checkpointRow Int @default(0)
+
+  validationErrors Json    @default("[]")
+  errorMessage     String?
+  attempts         Int     @default(0)
+
+  uploadedByUserId  String?   @db.Uuid
+  confirmedByUserId String?   @db.Uuid
+  validatedAt       DateTime? @db.Timestamptz(6)
+  confirmedAt       DateTime? @db.Timestamptz(6)
+  startedAt         DateTime? @db.Timestamptz(6)
+  completedAt       DateTime? @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @db.Timestamptz(6)
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  property     Property          @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  bankAccount  BankAccount       @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
+  rows         ImportRow[]
+  transactions BankTransaction[]
+
+  @@index([organizationId, status])
+  @@index([propertyId, createdAt])
+  @@index([bankAccountId, fileHash])
+  @@map("import_batches")
+}
+
+/// One parsed row of an import file. Retained so an accountant can see exactly
+/// which line produced which payment, or why a line was rejected.
+model ImportRow {
+  id            String  @id @default(uuid()) @db.Uuid
+  importBatchId String  @db.Uuid
+  /// 1-based index of the data row, excluding the header.
+  rowNumber     Int
+  rawValues     Json
+  externalId    String?
+  outcome       String
+  message       String?
+  transactionId String? @db.Uuid
+
+  batch ImportBatch @relation(fields: [importBatchId], references: [id], onDelete: Cascade)
+
+  @@unique([importBatchId, rowNumber])
+  @@index([importBatchId, outcome])
+  @@map("import_rows")
+}
+
+model BankTransaction {
+  id             String  @id @default(uuid()) @db.Uuid
+  organizationId String  @db.Uuid
+  propertyId     String  @db.Uuid
+  bankAccountId  String  @db.Uuid
+  importBatchId  String? @db.Uuid
+
+  source      TransactionSource
+  /// Namespace of the external identifier: the provider name, or "csv".
+  providerKey String
+  /// The source system's own identifier for this transaction.
+  externalId  String
+
+  direction      TransactionDirection @default(CREDIT)
+  status         TransactionStatus    @default(UNAPPLIED)
+  currency       String               @db.Char(3)
+  amountCents    BigInt
+  allocatedCents BigInt               @default(0)
+
+  /// Date the provider says the money moved, in the property's calendar.
+  postedDate  DateTime  @db.Date
+  /// Date the receipt is recognised on; determines the period below.
+  postingDate DateTime  @db.Date
+  period      String    @db.VarChar(7)
+  valueDate   DateTime? @db.Date
+
+  reference       String?
+  /// Payer-supplied text. Untrusted: normalized for matching, never executed.
+  description     String?
+  /// The provider's raw payload, kept outside the financial fields above.
+  providerPayload Json    @default("{}")
+
+  /// Set when a provider reversal unwound this receipt.
+  reversedAt            DateTime? @db.Timestamptz(6)
+  reversalReason        String?
+  /// For a reversal transaction, the receipt it reverses.
+  reversesTransactionId String?   @db.Uuid
+
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization              @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  property     Property                  @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  bankAccount  BankAccount               @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
+  importBatch  ImportBatch?              @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
+  reverses     BankTransaction?          @relation("TransactionReversal", fields: [reversesTransactionId], references: [id], onDelete: SetNull)
+  reversedBy   BankTransaction[]         @relation("TransactionReversal")
+  allocations  Allocation[]
+  suggestions  MatchSuggestion[]
+  exceptions   ReconciliationException[]
+
+  /// Record-level deduplication: one external id per provider per account.
+  @@unique([bankAccountId, providerKey, externalId])
+  @@index([propertyId, status, postedDate])
+  @@index([propertyId, period])
+  @@index([organizationId, reference])
+  @@index([importBatchId])
+  @@map("bank_transactions")
+}
+
+// ===========================================================================
+// Reconciliation
+// ===========================================================================
+
+model MatchSuggestion {
+  id             String           @id @default(uuid()) @db.Uuid
+  organizationId String           @db.Uuid
+  transactionId  String           @db.Uuid
+  strategy       MatchStrategy
+  status         SuggestionStatus @default(PROPOSED)
+
+  /// Stable identity of the proposal, used to avoid storing duplicates.
+  fingerprint    String
+  /// [{ chargeId, amountCents }]. Validated again at approval time.
+  lines          Json
+  totalCents     BigInt
+  remainderCents BigInt @default(0)
+
+  /// Ranking score, not a probability. Never rendered as a confidence percentage.
+  score           Decimal @db.Decimal(6, 1)
+  scoreComponents Json    @default("{}")
+  evidence        Json    @default("[]")
+  warnings        Json    @default("[]")
+  ruleVersion     String
+  /// Record versions the suggestion was computed against.
+  recordVersions  Json    @default("{}")
+
+  generatedAt  DateTime  @default(now()) @db.Timestamptz(6)
+  supersededAt DateTime? @db.Timestamptz(6)
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  transaction  BankTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@unique([transactionId, fingerprint])
+  @@index([transactionId, status, score])
+  @@map("match_suggestions")
+}
+
+model Allocation {
+  id             String           @id @default(uuid()) @db.Uuid
+  organizationId String           @db.Uuid
+  propertyId     String           @db.Uuid
+  transactionId  String           @db.Uuid
+  chargeId       String           @db.Uuid
+  amountCents    BigInt
+  currency       String           @db.Char(3)
+  status         AllocationStatus @default(ACTIVE)
+
+  postingDate DateTime @db.Date
+  period      String   @db.VarChar(7)
+
+  /// Set when the allocation came from an approved suggestion.
+  suggestionId     String?  @db.Uuid
+  /// Always a real user. A background worker never approves an allocation.
+  approvedByUserId String   @db.Uuid
+  approvedAt       DateTime @default(now()) @db.Timestamptz(6)
+  note             String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  property     Property            @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  transaction  BankTransaction     @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+  charge       Charge              @relation(fields: [chargeId], references: [id], onDelete: Restrict)
+  reversal     AllocationReversal?
+
+  @@index([transactionId, status])
+  @@index([chargeId, status])
+  @@index([propertyId, period, status])
+  @@map("allocations")
+}
+
+/// Compensating record for a reversed allocation. One per allocation, enforced
+/// by the unique index, so an allocation cannot be reversed twice.
+model AllocationReversal {
+  id               String   @id @default(uuid()) @db.Uuid
+  organizationId   String   @db.Uuid
+  allocationId     String   @unique @db.Uuid
+  amountCents      BigInt
+  reason           String
+  postingDate      DateTime @db.Date
+  period           String   @db.VarChar(7)
+  reversedByUserId String   @db.Uuid
+  createdAt        DateTime @default(now()) @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  allocation   Allocation   @relation(fields: [allocationId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, createdAt])
+  @@map("allocation_reversals")
+}
+
+model ReconciliationException {
+  id             String  @id @default(uuid()) @db.Uuid
+  organizationId String  @db.Uuid
+  propertyId     String  @db.Uuid
+  transactionId  String? @db.Uuid
+  tenantId       String? @db.Uuid
+
+  category   ExceptionCategory
+  status     ExceptionStatus   @default(OPEN)
+  severity   ExceptionSeverity @default(MEDIUM)
+  summary    String
+  /// True when this exception must be resolved before the period can close.
+  isBlocking Boolean           @default(false)
+
+  /// Unreconciled amount when the exception was raised.
+  openAmountCents BigInt @default(0)
+  currency        String @db.Char(3)
+  period          String @db.VarChar(7)
+
+  assignedToUserId String?              @db.Uuid
+  resolution       ExceptionResolution?
+  resolutionReason String?
+  resolvedByUserId String?              @db.Uuid
+  resolvedAt       DateTime?            @db.Timestamptz(6)
+  reopenedReason   String?
+  reopenCount      Int                  @default(0)
+
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization  Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  property      Property           @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  transaction   BankTransaction?   @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+  tenant        Tenant?            @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  assignedTo    User?              @relation("ExceptionAssignee", fields: [assignedToUserId], references: [id], onDelete: SetNull)
+  resolvedBy    User?              @relation("ExceptionResolver", fields: [resolvedByUserId], references: [id], onDelete: SetNull)
+  comments      ExceptionComment[]
+  assistantRuns AssistantRun[]
+
+  @@index([propertyId, status, severity])
+  @@index([organizationId, status, createdAt])
+  @@index([assignedToUserId, status])
+  @@index([propertyId, period, isBlocking, status])
+  @@map("reconciliation_exceptions")
+}
+
+model ExceptionComment {
+  id           String   @id @default(uuid()) @db.Uuid
+  exceptionId  String   @db.Uuid
+  authorUserId String   @db.Uuid
+  body         String
+  /// Storage keys of attachments. Downloaded only through an authorized route.
+  attachments  Json     @default("[]")
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+
+  exception ReconciliationException @relation(fields: [exceptionId], references: [id], onDelete: Cascade)
+  author    User                    @relation(fields: [authorUserId], references: [id], onDelete: Restrict)
+
+  @@index([exceptionId, createdAt])
+  @@map("exception_comments")
+}
+
+// ===========================================================================
+// Accounting
+// ===========================================================================
+
+model LedgerAccount {
+  id             String            @id @default(uuid()) @db.Uuid
+  organizationId String            @db.Uuid
+  code           LedgerAccountCode
+  name           String
+  normalBalance  NormalBalance
+  createdAt      DateTime          @default(now()) @db.Timestamptz(6)
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  lines        JournalLine[]
+
+  @@unique([organizationId, code])
+  @@map("ledger_accounts")
+}
+
+model JournalEntry {
+  id             String @id @default(uuid()) @db.Uuid
+  organizationId String @db.Uuid
+  propertyId     String @db.Uuid
+
+  /// Deterministic identity of the business event. The unique index below is
+  /// the post-once guarantee: a retry or redelivery cannot post twice.
+  postingEventId String
+  eventType      JournalEventType
+
+  currency     String   @db.Char(3)
+  postingDate  DateTime @db.Date
+  businessDate DateTime @db.Date
+  period       String   @db.VarChar(7)
+  description  String
+
+  sourceType             String
+  sourceId               String  @db.Uuid
+  /// Posting event id of the entry this one reverses, when applicable.
+  reversesPostingEventId String?
+
+  totalDebitCents  BigInt
+  totalCreditCents BigInt
+
+  createdByUserId String?  @db.Uuid
+  correlationId   String?
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  property     Property      @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  lines        JournalLine[]
+
+  @@unique([organizationId, postingEventId])
+  @@index([propertyId, period, eventType])
+  @@index([propertyId, postingDate])
+  @@index([sourceType, sourceId])
+  @@map("journal_entries")
+}
+
+model JournalLine {
+  id          String            @id @default(uuid()) @db.Uuid
+  entryId     String            @db.Uuid
+  accountId   String            @db.Uuid
+  accountCode LedgerAccountCode
+  debitCents  BigInt            @default(0)
+  creditCents BigInt            @default(0)
+  memo        String
+
+  /// Reporting dimensions. Never used when checking that the entry balances.
+  tenantId String? @db.Uuid
+  leaseId  String? @db.Uuid
+  chargeId String? @db.Uuid
+
+  entry   JournalEntry  @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  account LedgerAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([entryId])
+  @@index([accountCode])
+  @@index([chargeId])
+  @@map("journal_lines")
+}
+
+model AccountingPeriod {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  propertyId     String       @db.Uuid
+  period         String       @db.VarChar(7)
+  status         PeriodStatus @default(OPEN)
+
+  reviewStartedAt DateTime? @db.Timestamptz(6)
+  closedAt        DateTime? @db.Timestamptz(6)
+  reopenedAt      DateTime? @db.Timestamptz(6)
+  reopenReason    String?
+  reopenCount     Int       @default(0)
+
+  /// Bumped on every state change; posting paths compare it to detect a race.
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  property     Property        @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  snapshots    CloseSnapshot[]
+
+  @@unique([propertyId, period])
+  @@index([organizationId, period, status])
+  @@map("accounting_periods")
+}
+
+model CloseSnapshot {
+  id             String @id @default(uuid()) @db.Uuid
+  organizationId String @db.Uuid
+  propertyId     String @db.Uuid
+  periodId       String @db.Uuid
+  period         String @db.VarChar(7)
+
+  chargesPostedCents     BigInt
+  paymentsReceivedCents  BigInt
+  paymentsAllocatedCents BigInt
+  outstandingCents       BigInt
+  unappliedCashCents     BigInt
+  currency               String @db.Char(3)
+
+  /// Blocker and acknowledgement results exactly as evaluated at close time.
+  checklist Json
+  /// Full readiness evaluation, retained for audit.
+  readiness Json
+
+  closedByUserId String   @db.Uuid
+  closedAt       DateTime @default(now()) @db.Timestamptz(6)
+
+  organization     Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  property         Property         @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  accountingPeriod AccountingPeriod @relation(fields: [periodId], references: [id], onDelete: Restrict)
+  closedBy         User             @relation(fields: [closedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([propertyId, period, closedAt])
+  @@map("close_snapshots")
+}
+
+// ===========================================================================
+// Infrastructure
+// ===========================================================================
+
+/// Append-only through the application's own interfaces. No resolver, service
+/// or job updates or deletes a row here. Direct database access is outside that
+/// guarantee, which is why this is not described as tamper-proof.
+model AuditEvent {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @db.Uuid
+  propertyId     String?  @db.Uuid
+  actorUserId    String?  @db.Uuid
+  /// Set instead of actorUserId when a worker acted without a human.
+  actorSystem    String?
+  action         String
+  entityType     String
+  entityId       String
+  metadata       Json     @default("{}")
+  correlationId  String?
+  occurredAt     DateTime @default(now()) @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actor        User?        @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, occurredAt])
+  @@index([entityType, entityId, occurredAt])
+  @@index([actorUserId, occurredAt])
+  @@index([propertyId, occurredAt])
+  @@map("audit_events")
+}
+
+/// Transactional outbox. Written in the same transaction as the business change
+/// it describes, then dispatched to the queue by a separate poller.
+model OutboxEvent {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  eventType      String
+  /// Aggregate id. Events sharing a key are dispatched in insertion order.
+  partitionKey   String
+  payload        Json
+  status         OutboxStatus @default(PENDING)
+  attempts       Int          @default(0)
+  lastError      String?
+  availableAt    DateTime     @default(now()) @db.Timestamptz(6)
+  dispatchedAt   DateTime?    @db.Timestamptz(6)
+  correlationId  String?
+  createdAt      DateTime     @default(now()) @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([status, availableAt])
+  @@index([partitionKey, createdAt])
+  @@map("outbox_events")
+}
+
+/// Consumer-side deduplication for at-least-once delivery. A consumer writes
+/// its row in the same transaction as its side effect, so a redelivery becomes
+/// a no-op instead of a second financial change.
+model ProcessedEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  consumer    String
+  eventId     String
+  processedAt DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([consumer, eventId])
+  @@index([processedAt])
+  @@map("processed_events")
+}
+
+/// Idempotency keys for retryable financial commands. Scoped to organization
+/// and operation; reusing a key with different input is rejected rather than
+/// silently returning the earlier result.
+model IdempotencyRecord {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  operation      String
+  key            String
+  /// SHA-256 of the canonicalised request input.
+  requestHash    String    @db.VarChar(64)
+  /// Stored result, replayed verbatim when the same key and input recur.
+  responseBody   Json?
+  status         String    @default("IN_PROGRESS")
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  completedAt    DateTime? @db.Timestamptz(6)
+  expiresAt      DateTime  @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, operation, key])
+  @@index([expiresAt])
+  @@map("idempotency_records")
+}
+
+model AssistantRun {
+  id                String             @id @default(uuid()) @db.Uuid
+  organizationId    String             @db.Uuid
+  exceptionId       String             @db.Uuid
+  requestedByUserId String             @db.Uuid
+  status            AssistantRunStatus @default(RUNNING)
+
+  provider      String
+  model         String
+  promptVersion String
+
+  /// Structured, schema-validated output. Null until the run succeeds.
+  output       Json?
+  /// Record ids the assistant cited, for checking its claims against sources.
+  citedRecords Json    @default("[]")
+  errorCode    String?
+  errorMessage String?
+
+  toolCallCount Int  @default(0)
+  inputTokens   Int?
+  outputTokens  Int?
+  durationMs    Int?
+
+  startedAt   DateTime  @default(now()) @db.Timestamptz(6)
+  completedAt DateTime? @db.Timestamptz(6)
+
+  organization Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  exception    ReconciliationException @relation(fields: [exceptionId], references: [id], onDelete: Cascade)
+  requestedBy  User                    @relation(fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  toolCalls    AssistantToolCall[]
+
+  @@index([exceptionId, startedAt])
+  @@index([organizationId, status])
+  @@map("assistant_runs")
+}
+
+/// One read-only tool invocation inside an assistant run. Recorded whether it
+/// was permitted or denied, so a denied attempt is visible in the audit trail.
+model AssistantToolCall {
+  id            String   @id @default(uuid()) @db.Uuid
+  runId         String   @db.Uuid
+  sequence      Int
+  toolName      String
+  arguments     Json
+  allowed       Boolean
+  denialReason  String?
+  resultSummary String?
+  durationMs    Int?
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+
+  run AssistantRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, sequence])
+  @@map("assistant_tool_calls")
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@rentwell/graphql",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node ./scripts/copy-schema.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@rentwell/domain": "workspace:*",
+    "graphql": "^16.9.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.3",
+    "vitest": "^1.6.0"
+  }
+}

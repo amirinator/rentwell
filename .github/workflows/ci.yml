@@ -1,0 +1,263 @@
+# Continuous integration.
+#
+# The jobs are ordered by how fast they fail. Type checking and the pure domain
+# tests need no services and finish in under a minute, so a mistake in the
+# financial rules is reported before anything spins up a database.
+#
+# The correctness suite is the gate: it runs the domain tests, the schema parity
+# checks, the database integration tests and the worker recovery tests. A pull
+# request that breaks any of them does not merge.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '20.17.0'
+  PNPM_VERSION: '9.12.0'
+
+jobs:
+  static:
+    name: Types, lint and format
+    runs-on: ubuntu-latest
+
+    # `prisma validate` resolves env("DATABASE_URL") from the datasource block
+    # before it checks anything, and fails with P1012 when the variable is
+    # absent. It never opens a connection, so a placeholder is enough — this job
+    # deliberately has no database service.
+    env:
+      DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The client is generated before type checking because the API's types
+      # depend on it.
+      - name: Generate the Prisma client
+        run: pnpm --filter @rentwell/database generate
+
+      - name: Validate the Prisma schema
+        run: pnpm --filter @rentwell/database validate
+
+      # Workspace packages resolve through their package.json to dist/, and
+      # dist/ is not committed. Without this, a fresh checkout type-checks
+      # against a module that does not exist yet and every dependent package
+      # reports TS7016.
+      - name: Build the workspace packages
+        run: pnpm -r --filter "./packages/**" build
+
+      - run: pnpm -r typecheck
+      - run: pnpm lint
+      - run: pnpm format:check
+
+  unit:
+    name: Domain and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The suites below import @rentwell/domain by package name, which resolves
+      # to dist/. That is a build artifact and is not committed, so the packages
+      # are generated and built here even though no service is involved.
+      - name: Generate the Prisma client
+        run: pnpm --filter @rentwell/database generate
+
+      - name: Build the workspace packages
+        run: pnpm -r --filter "./packages/**" build
+
+      # No database, no Redis, no network. These are the rules that decide
+      # money, and they are provable on their own.
+      - name: Domain tests
+        run: pnpm --filter @rentwell/domain test
+
+      - name: Integration adapter tests
+        run: pnpm --filter @rentwell/integrations test
+
+      - name: GraphQL contract tests
+        run: pnpm --filter @rentwell/graphql test
+
+      - name: Enum parity between Prisma and the domain
+        run: pnpm --filter @rentwell/database test
+
+  integration:
+    name: Database and worker integration
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rentwell
+          POSTGRES_PASSWORD: rentwell
+          POSTGRES_DB: rentwell_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U rentwell"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      DATABASE_URL: postgresql://rentwell:rentwell@localhost:5432/rentwell_test?schema=public
+      TEST_DATABASE_URL: postgresql://rentwell:rentwell@localhost:5432/rentwell_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      SESSION_SECRET: ci-session-secret-that-is-long-enough-to-pass
+      S3_ACCESS_KEY_ID: ci
+      S3_SECRET_ACCESS_KEY: ci-secret
+      AI_PROVIDER: mock
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install the required PostgreSQL extensions
+        run: |
+          PGPASSWORD=rentwell psql -h localhost -U rentwell -d rentwell_test \
+            -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto; CREATE EXTENSION IF NOT EXISTS citext;'
+
+      - name: Apply migrations and verify no schema drift
+        run: node scripts/db-bootstrap.mjs
+
+      - name: Build the workspace packages
+        run: pnpm -r --filter "./packages/**" build
+
+      - name: API integration tests
+        run: pnpm --filter @rentwell/api test:integration
+
+      - name: Worker recovery tests
+        run: pnpm --filter @rentwell/worker test
+
+  browser:
+    name: Browser tests
+    runs-on: ubuntu-latest
+    needs: [static, unit]
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rentwell
+          POSTGRES_PASSWORD: rentwell
+          POSTGRES_DB: rentwell
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U rentwell"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+      minio:
+        image: bitnami/minio:latest
+        env:
+          MINIO_ROOT_USER: rentwell
+          MINIO_ROOT_PASSWORD: rentwell-local-secret
+          MINIO_DEFAULT_BUCKETS: rentwell-imports
+        ports: ['9000:9000']
+
+    env:
+      DATABASE_URL: postgresql://rentwell:rentwell@localhost:5432/rentwell?schema=public
+      REDIS_URL: redis://localhost:6379
+      S3_ENDPOINT: http://localhost:9000
+      S3_ACCESS_KEY_ID: rentwell
+      S3_SECRET_ACCESS_KEY: rentwell-local-secret
+      SESSION_SECRET: ci-session-secret-that-is-long-enough-to-pass
+      WEB_ORIGIN: http://localhost:5173
+      AI_PROVIDER: mock
+      # The seeded data is dated 2026, so the UI defaults to that period.
+      VITE_DEFAULT_PERIOD: '2026-03'
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install the required PostgreSQL extensions
+        run: |
+          PGPASSWORD=rentwell psql -h localhost -U rentwell -d rentwell \
+            -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto; CREATE EXTENSION IF NOT EXISTS citext;'
+
+      - run: node scripts/db-bootstrap.mjs
+      - run: pnpm -r --filter "./packages/**" build
+      - run: pnpm --filter @rentwell/api build
+      - run: pnpm --filter @rentwell/worker build
+
+      # A smaller portfolio than the demo default: the browser tests need the
+      # scenarios, not 28 properties' worth of data.
+      - name: Seed demonstration data
+        run: pnpm --filter @rentwell/test-fixtures seed:reset
+        env:
+          SEED_PROPERTY_COUNT: '4'
+
+      - name: Install Playwright browsers
+        run: pnpm --filter @rentwell/web exec playwright install --with-deps chromium
+
+      - name: Run the browser tests
+        run: pnpm --filter @rentwell/web test:e2e
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report/
+          retention-days: 7

@@ -1,0 +1,29 @@
+{
+  "name": "@rentwell/database",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "generate": "prisma generate",
+    "migrate": "prisma migrate deploy",
+    "migrate:dev": "prisma migrate dev",
+    "reset": "prisma migrate reset --force",
+    "studio": "prisma studio",
+    "format": "prisma format",
+    "validate": "prisma validate",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@prisma/client": "5.22.0",
+    "@rentwell/domain": "workspace:*"
+  },
+  "devDependencies": {
+    "prisma": "5.22.0",
+    "typescript": "^5.5.3",
+    "vitest": "^1.6.0"
+  }
+}

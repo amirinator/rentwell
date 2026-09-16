@@ -1,0 +1,21 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "composite": true,
+    "tsBuildInfoFile": "dist/.tsbuildinfo",
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "strictPropertyInitialization": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["test/**/*", "dist"],
+  "references": [
+    { "path": "../../packages/domain" },
+    { "path": "../../packages/database" },
+    { "path": "../../packages/graphql" },
+    { "path": "../../packages/integrations" },
+    { "path": "../../packages/observability" }
+  ]
+}

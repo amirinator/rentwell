@@ -1,0 +1,1281 @@
+# Rentwell GraphQL schema.
+#
+# Conventions:
+#
+#  * Money crosses the API as `Money { cents: SafeInt!, currency: String! }`.
+#    A minor-unit integer plus its currency cannot be misread as a float and
+#    cannot arrive without a currency, which is why there is no `Float` amount
+#    anywhere in this schema.
+#  * Business dates are `Date` (YYYY-MM-DD, no offset). Instants are
+#    `DateTime` (ISO-8601 UTC). Accounting periods are `Period` (YYYY-MM).
+#  * Lists that can grow are cursor-paginated Relay-style connections with a
+#    bounded `first`.
+#  * Mutations that move money take an `idempotencyKey`, so a retried request
+#    cannot post twice.
+#  * Errors are returned as GraphQL errors carrying a stable
+#    `extensions.code` from the domain error vocabulary.
+
+scalar Date
+scalar DateTime
+scalar Period
+scalar SafeInt
+scalar JSON
+
+# ---------------------------------------------------------------------------
+# Shared
+# ---------------------------------------------------------------------------
+
+"An exact monetary amount in minor units, with its currency."
+type Money {
+  "Signed integer minor units. 1234 in USD means $12.34."
+  cents: SafeInt!
+  currency: String!
+  "Preformatted for display, e.g. \"1,234.56\". Never parsed back by a client."
+  formatted: String!
+}
+
+input MoneyInput {
+  cents: SafeInt!
+  currency: String!
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}
+
+# ---------------------------------------------------------------------------
+# Enumerations. These mirror the database and domain enumerations exactly.
+# ---------------------------------------------------------------------------
+
+enum Role {
+  ORG_ADMIN
+  PORTFOLIO_CONTROLLER
+  ACCOUNTANT
+  PROPERTY_MANAGER
+  AUDITOR
+}
+
+enum PropertyStatus {
+  ACTIVE
+  INACTIVE
+  DISPOSED
+}
+
+enum OccupancyStatus {
+  VACANT
+  OCCUPIED
+  OUT_OF_SERVICE
+}
+
+enum LeaseStatus {
+  DRAFT
+  ACTIVE
+  EXPIRED
+  TERMINATED
+}
+
+enum ChargeType {
+  BASE_RENT
+  OPERATING
+  ONE_TIME
+}
+
+enum ChargeStatus {
+  POSTED
+  SETTLED
+  VOIDED
+}
+
+enum ImportStatus {
+  DRAFT
+  VALIDATING
+  READY
+  QUEUED
+  PROCESSING
+  COMPLETED
+  VALIDATION_FAILED
+  FAILED
+  CANCELLED
+}
+
+enum TransactionStatus {
+  UNAPPLIED
+  PARTIALLY_ALLOCATED
+  ALLOCATED
+  REVERSED
+  EXCLUDED
+}
+
+enum TransactionDirection {
+  CREDIT
+  DEBIT
+}
+
+enum TransactionSource {
+  CSV_IMPORT
+  PROVIDER_SYNC
+  PROVIDER_WEBHOOK
+  MANUAL
+}
+
+enum MatchStrategy {
+  EXACT_REFERENCE_AND_AMOUNT
+  EXACT_AMOUNT_SINGLE_CHARGE
+  REFERENCE_PARTIAL_AMOUNT
+  COMBINED_CHARGES
+  OVERPAYMENT_WITH_REMAINDER
+  DESCRIPTION_HEURISTIC
+}
+
+enum SuggestionStatus {
+  PROPOSED
+  APPROVED
+  REJECTED
+  SUPERSEDED
+}
+
+enum AllocationStatus {
+  ACTIVE
+  REVERSED
+}
+
+enum ExceptionCategory {
+  MISSING_REFERENCE
+  AMBIGUOUS_MATCH
+  UNDERPAYMENT
+  OVERPAYMENT
+  SUSPECTED_DUPLICATE
+  CURRENCY_MISMATCH
+  REVERSED_PAYMENT
+  INTEGRATION_CONFLICT
+}
+
+enum ExceptionStatus {
+  OPEN
+  ASSIGNED
+  IN_REVIEW
+  RESOLVED
+}
+
+enum ExceptionSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum ExceptionResolution {
+  ALLOCATED
+  REVERSED
+  CREDIT_ISSUED
+  CLASSIFIED_UNAPPLIED
+  DUPLICATE_CONFIRMED
+  WRITTEN_OFF
+  NO_ACTION_REQUIRED
+}
+
+enum PeriodStatus {
+  OPEN
+  IN_REVIEW
+  CLOSED
+}
+
+enum LedgerAccountCode {
+  ACCOUNTS_RECEIVABLE
+  RENTAL_INCOME
+  OPERATING_CHARGE_INCOME
+  CASH_CLEARING
+  UNAPPLIED_CASH
+}
+
+enum JournalEventType {
+  CHARGE_POSTED
+  CHARGE_CREDITED
+  PAYMENT_RECEIVED
+  PAYMENT_ALLOCATED
+  ALLOCATION_REVERSED
+  PAYMENT_REVERSED
+}
+
+enum AssistantRunStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+  BUDGET_EXCEEDED
+}
+
+# ---------------------------------------------------------------------------
+# Identity
+# ---------------------------------------------------------------------------
+
+type Viewer {
+  id: ID!
+  email: String!
+  displayName: String!
+  organization: Organization!
+  role: Role!
+  "Null for organization-scoped roles, which see every property."
+  assignedPropertyIds: [ID!]
+  "Action strings this viewer may perform. Drives UI affordances only; the server checks again."
+  permissions: [String!]!
+}
+
+type Organization {
+  id: ID!
+  slug: String!
+  name: String!
+  currency: String!
+}
+
+type OrganizationMember {
+  id: ID!
+  userId: ID!
+  email: String!
+  displayName: String!
+  role: Role!
+  status: String!
+  assignedProperties: [Property!]!
+}
+
+# ---------------------------------------------------------------------------
+# Portfolio
+# ---------------------------------------------------------------------------
+
+type Property {
+  id: ID!
+  code: String!
+  name: String!
+  addressLine1: String!
+  addressLine2: String
+  city: String!
+  region: String!
+  postalCode: String!
+  countryCode: String!
+  timezone: String!
+  currency: String!
+  status: PropertyStatus!
+  unitCount: Int!
+  activeLeaseCount: Int!
+  outstandingReceivables: Money!
+  unappliedCash: Money!
+  openExceptionCount: Int!
+  units(first: Int = 50, after: String): UnitConnection!
+  bankAccounts: [BankAccount!]!
+  period(period: Period!): AccountingPeriod
+}
+
+type PropertyEdge {
+  cursor: String!
+  node: Property!
+}
+
+type PropertyConnection {
+  edges: [PropertyEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type Unit {
+  id: ID!
+  identifier: String!
+  rentableArea: Int
+  floor: String
+  occupancy: OccupancyStatus!
+  property: Property!
+  currentLease: Lease
+}
+
+type UnitEdge {
+  cursor: String!
+  node: Unit!
+}
+
+type UnitConnection {
+  edges: [UnitEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type Tenant {
+  id: ID!
+  displayName: String!
+  kind: String!
+  contactEmail: String
+  contactPhone: String
+  paymentReference: String
+  isActive: Boolean!
+  leases: [Lease!]!
+  outstandingBalance: Money!
+}
+
+type Lease {
+  id: ID!
+  reference: String!
+  status: LeaseStatus!
+  currency: String!
+  termStart: Date!
+  termEnd: Date
+  paymentReference: String
+  property: Property!
+  unit: Unit!
+  tenant: Tenant!
+  schedules: [ChargeSchedule!]!
+  amendments: [LeaseAmendment!]!
+  outstandingBalance: Money!
+  version: Int!
+}
+
+type ChargeSchedule {
+  id: ID!
+  chargeType: ChargeType!
+  frequency: String!
+  description: String!
+  isActive: Boolean!
+  versions: [ChargeScheduleVersion!]!
+  "The version effective on the given date, if any."
+  effectiveVersion(on: Date!): ChargeScheduleVersion
+}
+
+type ChargeScheduleVersion {
+  id: ID!
+  versionNumber: Int!
+  amount: Money!
+  effectiveFrom: Date!
+  effectiveTo: Date
+  dueDayOfMonth: Int!
+  prorate: Boolean!
+  note: String
+}
+
+type LeaseAmendment {
+  id: ID!
+  summary: String!
+  changes: JSON!
+  effectiveOn: Date!
+  createdAt: DateTime!
+}
+
+# ---------------------------------------------------------------------------
+# Billing
+# ---------------------------------------------------------------------------
+
+type Charge {
+  id: ID!
+  type: ChargeType!
+  status: ChargeStatus!
+  description: String!
+  amount: Money!
+  allocatedAmount: Money!
+  creditedAmount: Money!
+  openBalance: Money!
+  serviceStart: Date!
+  serviceEnd: Date!
+  dueDate: Date!
+  postingDate: Date!
+  period: Period!
+  "How many days past due on the reporting date, or 0 when not yet due."
+  daysPastDue: Int!
+  "Inputs and intermediate values of the proration that produced the amount."
+  calculation: JSON!
+  property: Property!
+  lease: Lease!
+  tenant: Tenant!
+  scheduleVersion: ChargeScheduleVersion
+  allocations: [Allocation!]!
+  credits: [CreditAdjustment!]!
+  version: Int!
+}
+
+type ChargeEdge {
+  cursor: String!
+  node: Charge!
+}
+
+type ReceivableConnection {
+  edges: [ChargeEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+  "Totals over the whole filtered set, not just the current page."
+  totals: ReceivableTotals!
+}
+
+type ReceivableTotals {
+  charged: Money!
+  allocated: Money!
+  credited: Money!
+  outstanding: Money!
+}
+
+type CreditAdjustment {
+  id: ID!
+  amount: Money!
+  reason: String!
+  postingDate: Date!
+  period: Period!
+  createdAt: DateTime!
+}
+
+type ProposedCharge {
+  generationKey: String!
+  type: ChargeType!
+  description: String!
+  amount: Money!
+  serviceStart: Date!
+  serviceEnd: Date!
+  dueDate: Date!
+  lease: Lease!
+  tenant: Tenant!
+  calculation: JSON!
+}
+
+type GenerationWarning {
+  code: String!
+  message: String!
+  leaseId: ID!
+  scheduleId: ID
+}
+
+type ChargePreview {
+  period: Period!
+  propertyId: ID!
+  proposed: [ProposedCharge!]!
+  "Generation keys already present. Re-running generation skips these."
+  skippedKeys: [String!]!
+  warnings: [GenerationWarning!]!
+  totalAmount: Money!
+  leaseCount: Int!
+}
+
+type GenerationResult {
+  period: Period!
+  propertyId: ID!
+  createdCount: Int!
+  skippedCount: Int!
+  totalAmount: Money!
+  warnings: [GenerationWarning!]!
+  charges: [Charge!]!
+}
+
+# ---------------------------------------------------------------------------
+# Ingestion
+# ---------------------------------------------------------------------------
+
+type BankAccount {
+  id: ID!
+  label: String!
+  maskedNumber: String!
+  currency: String!
+  isActive: Boolean!
+  property: Property!
+  provider: String
+  lastSyncedAt: DateTime
+}
+
+type ImportValidationError {
+  rowNumber: Int
+  column: String
+  code: String!
+  message: String!
+  value: String
+}
+
+type ImportBatch {
+  id: ID!
+  status: ImportStatus!
+  originalFilename: String!
+  fileSizeBytes: Int!
+  fileHash: String!
+  totalRows: Int!
+  processedRows: Int!
+  createdRows: Int!
+  duplicateRows: Int!
+  failedRows: Int!
+  checkpointRow: Int!
+  validationErrors: [ImportValidationError!]!
+  errorMessage: String
+  attempts: Int!
+  property: Property!
+  bankAccount: BankAccount!
+  createdAt: DateTime!
+  confirmedAt: DateTime
+  completedAt: DateTime
+  "Signed, short-lived URL. Null unless the viewer may download the source file."
+  downloadUrl: String
+  rows(first: Int = 50, after: String, outcome: String): ImportRowConnection!
+}
+
+type ImportRow {
+  id: ID!
+  rowNumber: Int!
+  externalId: String
+  outcome: String!
+  message: String
+  rawValues: JSON!
+  transaction: BankTransaction
+}
+
+type ImportRowEdge {
+  cursor: String!
+  node: ImportRow!
+}
+
+type ImportRowConnection {
+  edges: [ImportRowEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type ImportUpload {
+  importId: ID!
+  "PUT the file here. Expires shortly; mint a new one rather than reusing it."
+  uploadUrl: String!
+  storageKey: String!
+  expiresAt: DateTime!
+}
+
+type ImportValidation {
+  importId: ID!
+  status: ImportStatus!
+  totalRows: Int!
+  validRows: Int!
+  errors: [ImportValidationError!]!
+  "Confirmation must quote this hash, binding it to the bytes that were validated."
+  fileHash: String!
+}
+
+type BankTransaction {
+  id: ID!
+  source: TransactionSource!
+  externalId: String!
+  direction: TransactionDirection!
+  status: TransactionStatus!
+  amount: Money!
+  allocatedAmount: Money!
+  unappliedAmount: Money!
+  postedDate: Date!
+  postingDate: Date!
+  period: Period!
+  reference: String
+  "Payer-supplied text. Treated as untrusted data everywhere in the system."
+  description: String
+  property: Property!
+  bankAccount: BankAccount!
+  allocations: [Allocation!]!
+  suggestions: [MatchSuggestion!]!
+  exception: ReconciliationException
+  reversedAt: DateTime
+  reversalReason: String
+  version: Int!
+}
+
+type TransactionEdge {
+  cursor: String!
+  node: BankTransaction!
+}
+
+type TransactionConnection {
+  edges: [TransactionEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+  totals: TransactionTotals!
+}
+
+type TransactionTotals {
+  received: Money!
+  allocated: Money!
+  unapplied: Money!
+}
+
+# ---------------------------------------------------------------------------
+# Reconciliation
+# ---------------------------------------------------------------------------
+
+type MatchEvidence {
+  kind: String!
+  label: String!
+  recordIds: [ID!]!
+  "Points this evidence contributed to the ranking score."
+  contribution: Float!
+}
+
+"""
+Points contributed by each matching signal, out of 100.
+
+Named `*Points` so nothing here reads as a monetary value: none of these is
+money, and the total is a ranking, not a probability.
+"""
+type ScoreComponents {
+  referencePoints: Float!
+  amountPoints: Float!
+  datePoints: Float!
+  descriptionPoints: Float!
+  totalPoints: Float!
+}
+
+type SuggestedAllocation {
+  charge: Charge!
+  amount: Money!
+}
+
+type MatchSuggestion {
+  id: ID!
+  strategy: MatchStrategy!
+  status: SuggestionStatus!
+  lines: [SuggestedAllocation!]!
+  totalAmount: Money!
+  remainder: Money!
+  """
+  Ranking score, not a probability. It orders candidates for human review and
+  must not be presented as a confidence percentage.
+  """
+  score: Float!
+  scoreComponents: ScoreComponents!
+  evidence: [MatchEvidence!]!
+  warnings: [String!]!
+  ruleVersion: String!
+  generatedAt: DateTime!
+  "True when the records it was computed against have changed since."
+  isStale: Boolean!
+}
+
+type Allocation {
+  id: ID!
+  amount: Money!
+  status: AllocationStatus!
+  postingDate: Date!
+  period: Period!
+  note: String
+  charge: Charge!
+  transaction: BankTransaction!
+  approvedBy: OrganizationMember
+  approvedAt: DateTime!
+  reversal: AllocationReversal
+}
+
+type AllocationReversal {
+  id: ID!
+  amount: Money!
+  reason: String!
+  postingDate: Date!
+  createdAt: DateTime!
+}
+
+type AllocationResult {
+  transaction: BankTransaction!
+  allocations: [Allocation!]!
+  totalAllocated: Money!
+  remainingUnapplied: Money!
+  "Exception raised or resolved as a result of this approval."
+  exception: ReconciliationException
+}
+
+type ReversalResult {
+  allocation: Allocation!
+  transaction: BankTransaction!
+  charge: Charge!
+}
+
+type ExceptionComment {
+  id: ID!
+  body: String!
+  authorName: String!
+  createdAt: DateTime!
+}
+
+type ReconciliationException {
+  id: ID!
+  category: ExceptionCategory!
+  status: ExceptionStatus!
+  severity: ExceptionSeverity!
+  summary: String!
+  isBlocking: Boolean!
+  openAmount: Money!
+  period: Period!
+  property: Property!
+  transaction: BankTransaction
+  tenant: Tenant
+  assignedTo: OrganizationMember
+  resolution: ExceptionResolution
+  resolutionReason: String
+  resolvedBy: OrganizationMember
+  resolvedAt: DateTime
+  reopenCount: Int!
+  comments: [ExceptionComment!]!
+  candidateCharges: [Charge!]!
+  assistantRuns: [AssistantRun!]!
+  createdAt: DateTime!
+  version: Int!
+}
+
+type ExceptionEdge {
+  cursor: String!
+  node: ReconciliationException!
+}
+
+type ExceptionConnection {
+  edges: [ExceptionEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+# ---------------------------------------------------------------------------
+# Accounting
+# ---------------------------------------------------------------------------
+
+type JournalLine {
+  id: ID!
+  accountCode: LedgerAccountCode!
+  debit: Money!
+  credit: Money!
+  memo: String!
+  chargeId: ID
+  tenantId: ID
+}
+
+type JournalEntry {
+  id: ID!
+  postingEventId: String!
+  eventType: JournalEventType!
+  description: String!
+  postingDate: Date!
+  businessDate: Date!
+  period: Period!
+  totalDebit: Money!
+  totalCredit: Money!
+  lines: [JournalLine!]!
+  property: Property!
+  sourceType: String!
+  sourceId: ID!
+  reversesPostingEventId: String
+  createdAt: DateTime!
+}
+
+type JournalEntryEdge {
+  cursor: String!
+  node: JournalEntry!
+}
+
+type JournalEntryConnection {
+  edges: [JournalEntryEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+  "Must be zero. A non-zero value means the subledger is inconsistent."
+  netDebitMinusCredit: Money!
+}
+
+type AccountBalance {
+  accountCode: LedgerAccountCode!
+  "Balance expressed in the account's own normal direction."
+  balance: Money!
+  debitTotal: Money!
+  creditTotal: Money!
+}
+
+type AccountingPeriod {
+  id: ID!
+  period: Period!
+  status: PeriodStatus!
+  reviewStartedAt: DateTime
+  closedAt: DateTime
+  reopenedAt: DateTime
+  reopenReason: String
+  reopenCount: Int!
+  version: Int!
+  latestSnapshot: CloseSnapshot
+}
+
+type CloseBlocker {
+  code: String!
+  message: String!
+  count: Int
+  resolutionHint: String!
+}
+
+type CloseAcknowledgement {
+  code: String!
+  message: String!
+  count: Int
+  amount: Money
+  requiresReason: Boolean!
+}
+
+type CloseTotals {
+  chargesPosted: Money!
+  paymentsReceived: Money!
+  paymentsAllocated: Money!
+  outstandingReceivables: Money!
+  unappliedCash: Money!
+}
+
+type CloseReadiness {
+  property: Property!
+  period: Period!
+  periodStatus: PeriodStatus!
+  blockers: [CloseBlocker!]!
+  acknowledgements: [CloseAcknowledgement!]!
+  totals: CloseTotals!
+  canClose: Boolean!
+  evaluatedAt: DateTime!
+}
+
+type CloseChecklistItem {
+  code: String!
+  kind: String!
+  satisfied: Boolean!
+  message: String!
+  reason: String
+}
+
+type CloseSnapshot {
+  id: ID!
+  period: Period!
+  property: Property!
+  totals: CloseTotals!
+  checklist: [CloseChecklistItem!]!
+  closedBy: OrganizationMember!
+  closedAt: DateTime!
+}
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+
+type AgingBucket {
+  label: String!
+  minDaysPastDue: Int!
+  maxDaysPastDue: Int
+  amount: Money!
+  chargeCount: Int!
+}
+
+type ExceptionBucket {
+  key: String!
+  label: String!
+  count: Int!
+  amount: Money!
+}
+
+type PropertyCloseStatus {
+  property: Property!
+  period: Period!
+  status: PeriodStatus!
+  blockerCount: Int!
+}
+
+type ProcessingHealth {
+  failedImports: Int!
+  importsInProgress: Int!
+  pendingOutboxEvents: Int!
+  oldestPendingEventAgeSeconds: Int!
+  deadLetterEvents: Int!
+}
+
+"""
+Portfolio totals.
+
+Every figure states its own basis: which date range it covers, which date field
+that range is applied to, and how reversed records are treated. `metricNotes`
+carries that description so a number on screen can always be explained.
+"""
+type PortfolioSummary {
+  period: Period!
+  propertyIds: [ID!]!
+  chargesPosted: Money!
+  paymentsReceived: Money!
+  paymentsAllocated: Money!
+  unappliedCash: Money!
+  outstandingReceivables: Money!
+  allocationRate: Float!
+  suggestionCoverage: Float!
+  aging: [AgingBucket!]!
+  exceptionsBySeverity: [ExceptionBucket!]!
+  exceptionsByOwner: [ExceptionBucket!]!
+  closeStatus: [PropertyCloseStatus!]!
+  processing: ProcessingHealth!
+  "The reporting date aging was calculated against."
+  asOfDate: Date!
+  refreshedAt: DateTime!
+  metricNotes: [MetricNote!]!
+}
+
+type MetricNote {
+  metric: String!
+  "Date field the period filter is applied to, e.g. \"charge.postingDate\"."
+  dateBasis: String!
+  "How reversed and credited records are counted."
+  reversalTreatment: String!
+  filters: String!
+}
+
+# ---------------------------------------------------------------------------
+# Audit and assistant
+# ---------------------------------------------------------------------------
+
+type AuditEvent {
+  id: ID!
+  action: String!
+  entityType: String!
+  entityId: ID!
+  actorName: String
+  actorSystem: String
+  metadata: JSON!
+  correlationId: String
+  occurredAt: DateTime!
+  property: Property
+}
+
+type AuditEventEdge {
+  cursor: String!
+  node: AuditEvent!
+}
+
+type AuditEventConnection {
+  edges: [AuditEventEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type AssistantCitation {
+  recordType: String!
+  recordId: ID!
+  label: String!
+}
+
+"""
+The assistant's structured answer. Every factual claim carries citations
+pointing at records the requesting user is authorized to read.
+"""
+type AssistantAnalysis {
+  summary: String!
+  supportingRecords: [AssistantCitation!]!
+  possibleExplanations: [String!]!
+  recommendedNextSteps: [String!]!
+  missingInformation: [String!]!
+}
+
+type AssistantToolCall {
+  sequence: Int!
+  toolName: String!
+  allowed: Boolean!
+  denialReason: String
+  resultSummary: String
+}
+
+type AssistantRun {
+  id: ID!
+  status: AssistantRunStatus!
+  provider: String!
+  model: String!
+  promptVersion: String!
+  analysis: AssistantAnalysis
+  toolCalls: [AssistantToolCall!]!
+  errorCode: String
+  errorMessage: String
+  durationMs: Int
+  startedAt: DateTime!
+  completedAt: DateTime
+}
+
+# ---------------------------------------------------------------------------
+# Filters
+# ---------------------------------------------------------------------------
+
+input PortfolioFilter {
+  propertyIds: [ID!]
+  period: Period!
+  "Reporting date used for aging. Defaults to the end of the period."
+  asOfDate: Date
+  tenantId: ID
+}
+
+input ReceivableFilter {
+  propertyIds: [ID!]
+  tenantId: ID
+  leaseId: ID
+  period: Period
+  statuses: [ChargeStatus!]
+  dueBefore: Date
+  onlyOutstanding: Boolean
+  asOfDate: Date
+}
+
+input TransactionFilter {
+  propertyIds: [ID!]
+  bankAccountId: ID
+  period: Period
+  statuses: [TransactionStatus!]
+  postedFrom: Date
+  postedTo: Date
+  search: String
+  onlyUnreconciled: Boolean
+}
+
+input ExceptionFilter {
+  propertyIds: [ID!]
+  statuses: [ExceptionStatus!]
+  categories: [ExceptionCategory!]
+  severities: [ExceptionSeverity!]
+  assignedToUserId: ID
+  period: Period
+  onlyBlocking: Boolean
+}
+
+input JournalFilter {
+  propertyId: ID!
+  period: Period
+  eventTypes: [JournalEventType!]
+  accountCode: LedgerAccountCode
+  sourceId: ID
+}
+
+input AuditFilter {
+  propertyIds: [ID!]
+  entityType: String
+  entityId: ID
+  actorUserId: ID
+  actions: [String!]
+  from: DateTime
+  to: DateTime
+}
+
+input ImportFilter {
+  propertyIds: [ID!]
+  statuses: [ImportStatus!]
+}
+
+# ---------------------------------------------------------------------------
+# Mutation inputs
+# ---------------------------------------------------------------------------
+
+input SignInInput {
+  email: String!
+  password: String!
+}
+
+type SignInResult {
+  viewer: Viewer!
+  csrfToken: String!
+}
+
+input PreviewChargesInput {
+  propertyId: ID!
+  period: Period!
+}
+
+input GenerateChargesInput {
+  propertyId: ID!
+  period: Period!
+  """
+  The preview must be confirmed unchanged. If generation would now produce a
+  different set, the mutation fails rather than posting something the
+  accountant did not see.
+  """
+  expectedGenerationKeys: [String!]!
+  idempotencyKey: String!
+}
+
+input CreateCreditInput {
+  chargeId: ID!
+  amount: MoneyInput!
+  reason: String!
+  postingDate: Date
+  idempotencyKey: String!
+}
+
+input CreateImportInput {
+  propertyId: ID!
+  bankAccountId: ID!
+  filename: String!
+  fileSizeBytes: Int!
+}
+
+input ConfirmImportInput {
+  importId: ID!
+  "Must equal the hash returned by validateImport."
+  fileHash: String!
+  idempotencyKey: String!
+}
+
+input AllocationLineInput {
+  chargeId: ID!
+  amount: MoneyInput!
+}
+
+input ApproveAllocationsInput {
+  transactionId: ID!
+  "Supply either a suggestion to approve as-is, or explicit lines."
+  suggestionId: ID
+  lines: [AllocationLineInput!]
+  "Version of the transaction the reviewer saw. A mismatch is a conflict."
+  expectedTransactionVersion: Int!
+  "Versions of each charge the reviewer saw."
+  expectedChargeVersions: [ChargeVersionInput!]!
+  note: String
+  idempotencyKey: String!
+}
+
+input ChargeVersionInput {
+  chargeId: ID!
+  version: Int!
+}
+
+input ReverseAllocationInput {
+  allocationId: ID!
+  reason: String!
+  postingDate: Date
+  idempotencyKey: String!
+}
+
+input AssignExceptionInput {
+  exceptionId: ID!
+  assignedToUserId: ID
+  severity: ExceptionSeverity
+  expectedVersion: Int!
+}
+
+input ResolveExceptionInput {
+  exceptionId: ID!
+  resolution: ExceptionResolution!
+  reason: String!
+  expectedVersion: Int!
+}
+
+input ReopenExceptionInput {
+  exceptionId: ID!
+  reason: String!
+  expectedVersion: Int!
+}
+
+input CommentOnExceptionInput {
+  exceptionId: ID!
+  body: String!
+}
+
+input StartPeriodReviewInput {
+  propertyId: ID!
+  period: Period!
+}
+
+input CloseAcknowledgementInput {
+  code: String!
+  reason: String
+}
+
+input ClosePeriodInput {
+  propertyId: ID!
+  period: Period!
+  acknowledgements: [CloseAcknowledgementInput!]!
+  "Version of the period the controller saw."
+  expectedVersion: Int!
+  idempotencyKey: String!
+}
+
+input ReopenPeriodInput {
+  propertyId: ID!
+  period: Period!
+  reason: String!
+  expectedVersion: Int!
+}
+
+input RegenerateSuggestionsInput {
+  transactionId: ID!
+}
+
+input SyncProviderInput {
+  connectionId: ID!
+}
+
+# ---------------------------------------------------------------------------
+# Root types
+# ---------------------------------------------------------------------------
+
+type Query {
+  viewer: Viewer
+
+  portfolioSummary(filter: PortfolioFilter!): PortfolioSummary!
+
+  properties(first: Int = 25, after: String, search: String): PropertyConnection!
+  property(id: ID!): Property
+
+  tenant(id: ID!): Tenant
+  lease(id: ID!): Lease
+
+  receivables(filter: ReceivableFilter!, first: Int = 25, after: String): ReceivableConnection!
+  charge(id: ID!): Charge
+
+  imports(filter: ImportFilter, first: Int = 25, after: String): ImportBatchConnection!
+  importBatch(id: ID!): ImportBatch
+
+  transactions(filter: TransactionFilter!, first: Int = 25, after: String): TransactionConnection!
+  transaction(id: ID!): BankTransaction
+  matchSuggestions(transactionId: ID!): [MatchSuggestion!]!
+
+  exceptions(filter: ExceptionFilter!, first: Int = 25, after: String): ExceptionConnection!
+  exception(id: ID!): ReconciliationException
+
+  closeReadiness(propertyId: ID!, period: Period!): CloseReadiness!
+  closeSnapshots(propertyId: ID!, first: Int = 12): [CloseSnapshot!]!
+
+  journalEntries(filter: JournalFilter!, first: Int = 25, after: String): JournalEntryConnection!
+  accountBalances(propertyId: ID!, period: Period!): [AccountBalance!]!
+
+  auditEvents(filter: AuditFilter!, first: Int = 25, after: String): AuditEventConnection!
+
+  assistantRun(id: ID!): AssistantRun
+
+  members: [OrganizationMember!]!
+}
+
+type ImportBatchEdge {
+  cursor: String!
+  node: ImportBatch!
+}
+
+type ImportBatchConnection {
+  edges: [ImportBatchEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type Mutation {
+  signIn(input: SignInInput!): SignInResult!
+  signOut: Boolean!
+
+  """
+  Computes the charges generation would create, without creating them.
+
+  It writes nothing financial, but it is a mutation rather than a query for two
+  reasons: it records an audit event, and its result must never be served from
+  a client cache, because an accountant confirming a stale preview is exactly
+  the mistake `expectedGenerationKeys` exists to catch.
+  """
+  previewCharges(input: PreviewChargesInput!): ChargePreview!
+  generateCharges(input: GenerateChargesInput!): GenerationResult!
+  createCreditAdjustment(input: CreateCreditInput!): Charge!
+
+  createImportUpload(input: CreateImportInput!): ImportUpload!
+  validateImport(importId: ID!): ImportValidation!
+  confirmImport(input: ConfirmImportInput!): ImportBatch!
+  cancelImport(importId: ID!): ImportBatch!
+  retryImport(importId: ID!): ImportBatch!
+
+  regenerateSuggestions(input: RegenerateSuggestionsInput!): [MatchSuggestion!]!
+  approveAllocations(input: ApproveAllocationsInput!): AllocationResult!
+  reverseAllocation(input: ReverseAllocationInput!): ReversalResult!
+
+  assignException(input: AssignExceptionInput!): ReconciliationException!
+  resolveException(input: ResolveExceptionInput!): ReconciliationException!
+  reopenException(input: ReopenExceptionInput!): ReconciliationException!
+  commentOnException(input: CommentOnExceptionInput!): ReconciliationException!
+
+  analyzeException(exceptionId: ID!): AssistantRun!
+
+  startPeriodReview(input: StartPeriodReviewInput!): AccountingPeriod!
+  closePeriod(input: ClosePeriodInput!): CloseSnapshot!
+  reopenPeriod(input: ReopenPeriodInput!): AccountingPeriod!
+
+  syncProvider(input: SyncProviderInput!): Boolean!
+}

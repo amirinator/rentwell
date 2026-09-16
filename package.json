@@ -1,0 +1,53 @@
+{
+  "name": "rentwell",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Commercial real estate financial operations platform",
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=20.11.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter \"./packages/**\" build && pnpm -r --filter \"./apps/**\" build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint . --ext .ts,.tsx --max-warnings 0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "pnpm -r test",
+    "test:unit": "pnpm --filter @rentwell/domain test && pnpm --filter @rentwell/integrations test && pnpm --filter @rentwell/graphql test && pnpm --filter @rentwell/database test",
+    "test:integration": "pnpm --filter @rentwell/api test:integration",
+    "test:worker": "pnpm --filter @rentwell/worker test",
+    "test:e2e": "pnpm --filter @rentwell/web test:e2e",
+    "db:generate": "pnpm --filter @rentwell/database generate",
+    "db:setup": "node scripts/db-bootstrap.mjs",
+    "db:verify": "node scripts/db-bootstrap.mjs --verify",
+    "db:migrate": "pnpm --filter @rentwell/database migrate",
+    "db:reset": "pnpm --filter @rentwell/database reset",
+    "seed": "pnpm --filter @rentwell/test-fixtures seed",
+    "seed:reset": "pnpm --filter @rentwell/test-fixtures seed:reset",
+    "dev": "docker compose up -d postgres redis minio minio-init && pnpm --parallel --filter @rentwell/api --filter @rentwell/worker --filter @rentwell/web dev"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@typescript-eslint/eslint-plugin": "^7.16.0",
+    "@typescript-eslint/parser": "^7.16.0",
+    "dotenv": "16.4.5",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-react-hooks": "4.6.2",
+    "prettier": "^3.3.3",
+    "typescript": "^5.5.3",
+    "vitest": "^1.6.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "@opentelemetry/sdk-metrics": "1.25.1",
+      "@opentelemetry/resources": "1.25.1",
+      "@opentelemetry/core": "1.25.1",
+      "@opentelemetry/semantic-conventions": "1.25.1",
+      "@opentelemetry/sdk-trace-base": "1.25.1"
+    }
+  }
+}

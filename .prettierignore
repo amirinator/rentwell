@@ -1,0 +1,9 @@
+node_modules
+dist
+build
+coverage
+pnpm-lock.yaml
+packages/database/generated
+packages/database/prisma/generated
+apps/web/playwright-report
+apps/web/test-results
